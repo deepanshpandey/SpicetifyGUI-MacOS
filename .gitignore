@@ -1,2 +1,6 @@
-.DS_store
-SpicetifyGUI-MacOS.xcodeproj/project.xcworkspace/xcuserdata/deepanshpandey.xcuserdatad/UserInterfaceState.xcuserstate
+# Xcode
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
