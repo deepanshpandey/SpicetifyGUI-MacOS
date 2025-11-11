@@ -1,182 +1,57 @@
-// ShellExecutor.swift
 import Foundation
 
-// Thread-safe accumulator to collect output across concurrently executing closures
+// MARK: - Thread-safe accumulator to collect concurrent output
 private final class OutputAccumulator: @unchecked Sendable {
-    nonisolated(unsafe) private let storage: NSMutableString = NSMutableString()
+    private let storage = NSMutableString()
     private let lock = NSLock()
-
-    nonisolated func append(_ string: String) {
+    
+    func append(_ string: String) {
         lock.lock()
         defer { lock.unlock() }
         storage.append(string)
     }
-
-    nonisolated func value() -> String {
+    
+    func value() -> String {
         lock.lock()
         defer { lock.unlock() }
         return String(storage)
     }
 }
 
-class ShellExecutor {
-    
+// MARK: - ShellExecutor
+final class ShellExecutor {
     static let shared = ShellExecutor()
-    
     private init() {}
+
+    // MARK: - Public Methods
     
+    /// Executes a shell command and returns the full output once complete.
     @discardableResult
     func execute(_ command: String, environment: [String: String]? = nil) async throws -> String {
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = Process()
-            let pipe = Pipe()
-            let errorPipe = Pipe()
-            
-            task.standardOutput = pipe
-            task.standardError = errorPipe
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = ["-c", command]
-            
-            // Set environment variables
-            if let env = environment {
-                var processEnv = ProcessInfo.processInfo.environment
-                for (key, value) in env {
-                    processEnv[key] = value
-                }
-                task.environment = processEnv
-            } else {
-                // Ensure PATH includes common locations
-                var processEnv = ProcessInfo.processInfo.environment
-                let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-                let additionalPaths = [
-                    "\(homeDir)/.spicetify",
-                    "\(homeDir)/.local/bin",
-                    "/usr/local/bin",
-                    "/opt/homebrew/bin"
-                ]
-                if let existingPath = processEnv["PATH"] {
-                    processEnv["PATH"] = additionalPaths.joined(separator: ":") + ":" + existingPath
-                }
-                task.environment = processEnv
-            }
-            
-            task.terminationHandler = { process in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-                
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: output)
-                } else {
-                    let error = errorOutput.isEmpty ? output : errorOutput
-                    continuation.resume(throwing: AppError.commandFailed(error))
-                }
-            }
-            
-            do {
-                try task.run()
-            } catch {
-                continuation.resume(throwing: AppError.commandFailed(error.localizedDescription))
-            }
-        }
+        try await runProcess(command, environment: environment, streamOutput: nil)
     }
-    
+
+    /// Executes a command and streams output live via a callback.
+    @discardableResult
     func executeWithRealTimeOutput(
         _ command: String,
         environment: [String: String]? = nil,
         outputHandler: @escaping (String) -> Void
     ) async throws -> String {
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = Process()
-            let pipe = Pipe()
-            let errorPipe = Pipe()
-            
-            task.standardOutput = pipe
-            task.standardError = errorPipe
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = ["-c", command]
-            
-            // Set environment variables
-            if let env = environment {
-                var processEnv = ProcessInfo.processInfo.environment
-                for (key, value) in env {
-                    processEnv[key] = value
-                }
-                task.environment = processEnv
-            } else {
-                var processEnv = ProcessInfo.processInfo.environment
-                let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-                let additionalPaths = [
-                    "\(homeDir)/.spicetify",
-                    "\(homeDir)/.local/bin",
-                    "/usr/local/bin",
-                    "/opt/homebrew/bin"
-                ]
-                if let existingPath = processEnv["PATH"] {
-                    processEnv["PATH"] = additionalPaths.joined(separator: ":") + ":" + existingPath
-                }
-                task.environment = processEnv
-            }
-            
-            let accumulator = OutputAccumulator()
-            // Handle standard output
-            pipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                    accumulator.append(output)
-                    Task { @MainActor in
-                        outputHandler(output)
-                    }
-                }
-            }
-            // Handle error output
-            errorPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                    accumulator.append(output)
-                    Task { @MainActor in
-                        outputHandler(output)
-                    }
-                }
-            }
-            task.terminationHandler = { process in
-                pipe.fileHandleForReading.readabilityHandler = nil
-                errorPipe.fileHandleForReading.readabilityHandler = nil
-                // Read any remaining data
-                let remainingData = pipe.fileHandleForReading.readDataToEndOfFile()
-                let remainingErrorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                if let remaining = String(data: remainingData, encoding: .utf8), !remaining.isEmpty {
-                    accumulator.append(remaining)
-                }
-                if let remainingError = String(data: remainingErrorData, encoding: .utf8), !remainingError.isEmpty {
-                    accumulator.append(remainingError)
-                }
-                let result = accumulator.value()
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(throwing: AppError.commandFailed(result))
-                }
-            }
-            
-            do {
-                try task.run()
-            } catch {
-                continuation.resume(throwing: AppError.commandFailed(error.localizedDescription))
-            }
-        }
+        try await runProcess(command, environment: environment, streamOutput: outputHandler)
     }
-    
+
+    /// Check if a command exists in the user’s environment.
     func checkCommandExists(_ command: String) async -> Bool {
         do {
-            let output = try await execute("which \(command)")
+            let output = try await execute("command -v \(command)")
             return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } catch {
             return false
         }
     }
-    
+
+    /// Get the version string for a given CLI tool.
     func getCommandVersion(_ command: String, versionFlag: String = "-v") async -> String? {
         do {
             let output = try await execute("\(command) \(versionFlag)")
@@ -185,16 +60,117 @@ class ShellExecutor {
             return nil
         }
     }
-    
+
+    /// Check whether Spotify is installed in the usual locations.
     func checkSpotifyInstalled() async -> Bool {
+        let fm = FileManager.default
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         let spotifyPaths = [
             "/Applications/Spotify.app",
-            await MainActor.run { () -> String in
-                return "\(FileManager.default.homeDirectoryForCurrentUser.path)/Applications/Spotify.app"
-            }
+            "\(home)/Applications/Spotify.app"
         ]
-        return await MainActor.run {
-            spotifyPaths.contains { FileManager.default.fileExists(atPath: $0) }
+        return spotifyPaths.contains { fm.fileExists(atPath: $0) }
+    }
+
+    // MARK: - Private Core Execution
+    
+    private func runProcess(
+        _ command: String,
+        environment: [String: String]?,
+        streamOutput: ((String) -> Void)?
+    ) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            let task = Process()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            let accumulator = OutputAccumulator()
+            
+            // Use user’s login shell (zsh -l -c)
+            task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            task.arguments = ["-l", "-c", command]
+            task.standardOutput = outputPipe
+            task.standardError = errorPipe
+            
+            // Merge environment with PATH fixes
+            var env = ProcessInfo.processInfo.environment
+            if let extra = environment {
+                for (key, value) in extra {
+                    env[key] = value
+                }
+            } else {
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let additionalPaths = [
+                    "\(home)/.spicetify",
+                    "\(home)/.local/bin",
+                    "/usr/local/bin",
+                    "/opt/homebrew/bin"
+                ]
+                if let existingPath = env["PATH"] {
+                    env["PATH"] = additionalPaths.joined(separator: ":") + ":" + existingPath
+                }
+            }
+            task.environment = env
+            
+            // Stream stdout
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
+                    Task{ @MainActor in
+                        accumulator.append(output)
+                    }
+                    if let stream = streamOutput {
+                        Task { @MainActor in stream(output) }
+                    }
+                }
+            }
+            
+            // Stream stderr
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
+                    Task{ @MainActor in
+                        accumulator.append(output)
+                    }
+                    if let stream = streamOutput {
+                        Task { @MainActor in stream(output) }
+                    }
+                }
+            }
+            
+            // Handle termination
+            task.terminationHandler = { process in
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                
+                // Read any remaining output
+                let remainingOut = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let remainingErr = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                
+                if let out = String(data: remainingOut, encoding: .utf8), !out.isEmpty {
+                    Task{ @MainActor in
+                        accumulator.append(out)
+                    }
+                }
+                if let err = String(data: remainingErr, encoding: .utf8), !err.isEmpty {
+                    Task{ @MainActor in
+                        accumulator.append(err)
+                    }
+                }
+                Task{ @MainActor in
+                    let result = accumulator.value()
+                    if process.terminationStatus == 0 {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: AppError.commandFailed(result))
+                    }
+                }
+            }
+            
+            do {
+                try task.run()
+            } catch {
+                continuation.resume(throwing: AppError.commandFailed(error.localizedDescription))
+            }
         }
     }
 }

@@ -41,19 +41,20 @@ class SpicetifyService {
     // Install Spicetify
     func install(outputHandler: @escaping (String) -> Void) async throws {
         // Check if Spotify is installed first
+        outputHandler("🔍 Checking prerequisites...\n")
         let spotifyInstalled = await shell.checkSpotifyInstalled()
         if !spotifyInstalled {
             throw AppError.spotifyNotFound
         }
         
-        outputHandler("🔍 Checking prerequisites...\n")
         outputHandler("✅ Spotify found\n\n")
-        outputHandler("📥 Starting Spicetify installation...\n")
-        outputHandler("This may take a few minutes...\n\n")
+        outputHandler("📥 Starting \"Spicetify\" and \"Spicetify Marketplace\" installation...\n")
+        outputHandler("This may take a few minutes (maybe Seconds)...\n\n")
         
         do {
             let installScript = """
-            curl -fsSL https://raw.githubusercontent.com/spicetify/spicetify-cli/master/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/spicetify/cli/main/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/spicetify/marketplace/main/resources/install.sh | sh
             """
             
             _ = try await shell.executeWithRealTimeOutput(installScript, outputHandler: outputHandler)
